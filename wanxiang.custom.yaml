@@ -13,8 +13,5 @@ patch:
   translator/enable_user_dict: true
   translator/contextual_suggestions: false
 
-  # 使用独立个人短语文件，避免修改上游 custom_phrase.txt。
-  custom_phrase/user_dict: personal_phrase
-
   # 关闭万象附加简码库；拼音补全仍可能产生短编码候选。
   switches/@8/reset: 0
