@@ -31,6 +31,13 @@ local tonumber = tonumber
 local floor = math.floor
 local concat = table.concat
 
+local wanxiang = require("wanxiang/wanxiang")
+
+local function should_skip(env)
+    local ctx = env.engine.context
+    return wanxiang.is_special_mode(ctx)
+end
+
 local function clear_array(t)
     if not t then return end
     for i = #t, 1, -1 do t[i] = nil end
@@ -142,14 +149,14 @@ function T.func(input, seg, env)
 
     input = input or ""
 
-    if input == "" or not env.eng_translator then
+    if input == "" then
         return
     end
 
-    local total_limit = env.max_candidates
-    local limited = total_limit > 0
+    -- 单字母大小写派生必须早于 special mode 判断。
+    -- U / V 等 special mode 只用于屏蔽后续格式化与兜底，
+    -- 不应吞掉单字母本身的 U/u、V/v 派生。
     local single_letter = is_single_ascii_letter(input)
-
     local current_candidate = nil
     local opposite_candidate = nil
     local injected_count = 0
@@ -164,10 +171,40 @@ function T.func(input, seg, env)
         if opposite_candidate then
             injected_count = injected_count + 1
         end
+    end
 
-        if limited and total_limit < injected_count then
-            total_limit = injected_count
+    -- special mode 下只保留已经完成的单字母派生，
+    -- 不继续查询英文词典；Filter 仍会原样透传，从而继续屏蔽格式化/兜底。
+    if should_skip(env) then
+        if current_candidate then
+            yield(current_candidate)
         end
+
+        if opposite_candidate then
+            yield(opposite_candidate)
+        end
+
+        return
+    end
+
+    -- 即使 TableTranslator 不可用，单字母派生仍然可正常输出。
+    if not env.eng_translator then
+        if current_candidate then
+            yield(current_candidate)
+        end
+
+        if opposite_candidate then
+            yield(opposite_candidate)
+        end
+
+        return
+    end
+
+    local total_limit = env.max_candidates
+    local limited = total_limit > 0
+
+    if single_letter and limited and total_limit < injected_count then
+        total_limit = injected_count
     end
 
     local native_limit = total_limit
@@ -603,7 +640,7 @@ end
 
 function P.func(key, env)
     if key:release() then
-        return 2
+        return wanxiang.RIME_PROCESS_RESULTS.kNoop
     end
 
     local ctx = env.engine.context
@@ -624,7 +661,7 @@ function P.func(key, env)
         env.typed_in_ascii = true
     end
 
-    return 2
+    return wanxiang.RIME_PROCESS_RESULTS.kNoop
 end
 
 local F = {}
@@ -633,7 +670,6 @@ function F.init(env)
     local cfg = env.engine.schema.config
     env.schema_id = env.engine.schema.schema_id
     env.memory = env.schema_id == "wanxiang_english" and {} or nil
-    -- 热路径 scratch 仅保存 Lua number/string，循环复用，避免每候选创建多张临时表。
     env.spacing_starts = {}
     env.spacing_chunks = {}
     env.spacing_output = {}
@@ -732,7 +768,12 @@ end
 
 function F.func(input, env)
     local ctx = env.engine.context
-
+    if should_skip(env) then
+        for cand in input:iter() do
+            yield(cand)
+        end
+        return
+    end
     if _G.english_spacing_break == true then
         env.prev_commit_is_eng = false
     end

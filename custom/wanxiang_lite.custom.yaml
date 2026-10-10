@@ -14,6 +14,13 @@ patch:
       #- wanxiang_algebra:/模糊音_z_zh
       #- wanxiang_algebra:/模糊音_s_sh
       - wanxiang_algebra:/lite/全拼
+      - wanxiang_algebra:/26jian
+      #- wanxiang_algebra:/18jian
+      #- wanxiang_algebra:/14jian
 
   #下面是候选数量
   menu/page_size: 6
+  #这个文件主要用于置顶，编码为自定义编码的词汇，取消注释用自己的词库名称避免覆盖，须与wanxiang_phrase.custom.yaml一同修改
+  #custom_phrase/dictionary: wanxiang_phrase_my
+  #这个文件主要用于自定义简码词汇，取消注释用自己的词库名称避免覆盖，须与wanxiang_abbrev.custom.yaml一同修改
+  #abbrev_phrase/dictionary: wanxiang_abbrev_my

@@ -50,6 +50,10 @@ local context_state = {
     learn_context2 = nil,
     learn_front = {},
     learn_ready = false,
+    -- 同一上下文读周期内缓存候选的精确 1/2-Gram fetch 结果；不引入 prefix query。
+    score_code1 = nil,
+    score_code2 = nil,
+    score_cache = {},
 }
 
 local REORDER_TYPE_WHITELIST = {
@@ -65,6 +69,12 @@ end
 local function clear_table(t)
     if not t then return end
     for k in pairs(t) do t[k] = nil end
+end
+
+local function clear_context_score_cache()
+    clear_table(context_state.score_cache)
+    context_state.score_code1 = nil
+    context_state.score_code2 = nil
 end
 
 local function clear_learning_snapshot()
@@ -83,6 +93,7 @@ local function reset_context()
     context_state.prev1 = nil
     context_state.last_commit_time = 0
     clear_learning_snapshot()
+    clear_context_score_cache()
 end
 
 local function reset_runtime_state()
@@ -256,11 +267,24 @@ end
 local function get_context_counts_by_code(db, text, code2, code1)
     if not db or not text or text == "" or not code1 then return 0, 0 end
 
+    -- 上下文没变时，同一个候选只精确 fetch 一次；输入码继续增长时直接复用结果。
+    -- code1/code2 变化（通常发生在 commit 后）自动开始新的读周期。
+    if context_state.score_code1 ~= code1 or context_state.score_code2 ~= code2 then
+        clear_context_score_cache()
+        context_state.score_code1 = code1
+        context_state.score_code2 = code2
+    end
+
+    local cached = context_state.score_cache[text]
+    if cached then return cached[1], cached[2] end
+
     local c1 = select(1, fetch_record(db, code1, text))
     local c2 = 0
     if code2 then c2 = select(1, fetch_record(db, code2, text)) end
     if c1 < 0 then c1 = 0 end
     if c2 < 0 then c2 = 0 end
+
+    context_state.score_cache[text] = { c2, c1 }
     return c2, c1
 end
 
@@ -329,6 +353,7 @@ local function rollback_last_commit(env)
     context_state.last_commit_time = env.undo_prev_time or 0
     context_state.after_number = env.undo_after_number == true
     clear_learning_snapshot()
+    clear_context_score_cache()
     clear_undo(env)
     return true
 end
@@ -433,6 +458,7 @@ function P.init(env)
             end
         end
 
+        clear_context_score_cache()
         context_state.prev2 = context_state.prev1
         context_state.prev1 = text
         context_state.last_commit_time = current_time
@@ -478,9 +504,10 @@ function P.init(env)
             end
         end)
 
-        -- 当前候选流已经发生删除事件，本轮学习快照作废；
-        -- 下一次 refresh 后 F 会按新候选重新建立。
+        -- 当前候选流已经发生删除事件，本轮学习快照与精确读取缓存同时作废；
+        -- 下一次 refresh 后 F 会按新候选和最新 DB 重新建立。
         clear_learning_snapshot()
+        clear_context_score_cache()
 
         if not ok then
             log.error("context_reorder delete sync error: " .. tostring(err))
@@ -498,7 +525,7 @@ function P.func(key, env)
         reset_runtime_state()
         clear_undo(env)
         env.need_delete_refresh = false
-        return 2
+        return wanxiang.RIME_PROCESS_RESULTS.kNoop
     end
 
     -- 原生删词已经完成后，再在下一次按键事件里刷新当前 composition。
@@ -513,7 +540,7 @@ function P.func(key, env)
         end
     end
 
-    if key:release() then return 2 end
+    if key:release() then return wanxiang.RIME_PROCESS_RESULTS.kNoop end
 
     local repr = key:repr()
     local is_composing = ctx:is_composing()
@@ -538,12 +565,12 @@ function P.func(key, env)
     -- 上屏后立即退格：撤销本次 1/2-Gram 数据库写入。
     if is_backspace and not is_composing then
         rollback_last_commit(env)
-        return 2
+        return wanxiang.RIME_PROCESS_RESULTS.kNoop
     end
 
     -- 一旦开始下一次实际输入，上一笔提交就不再允许回滚数据库。
     if env.just_committed and not is_backspace and not has_modifier then clear_undo(env) end
-    return 2
+    return wanxiang.RIME_PROCESS_RESULTS.kNoop
 end
 
 function P.fini(env)
@@ -586,96 +613,91 @@ local function make_candidate_reader(input)
     end
 end
 
-local function has_at_least_utf8_chars(text, count)
-    if not text or text == "" then return false end
-    local pos = utf8.offset(text, count)
-    return pos ~= nil and pos <= #text
+local function utf8_char_count(text)
+    if not text or text == "" or not (utf8 and utf8.codes) then return 0 end
+    local count = 0
+    for _ in utf8.codes(text) do count = count + 1 end
+    return count
 end
 
-local function protect_first_candidate(cand)
-    if not cand then return false end
-    local cand_type = cand.type or ""
-    local text = cand.text or ""
-    if cand_type == "sentence" then
-        return has_at_least_utf8_chars(text, 2)
-    end
-    if cand_type == "phrase" or cand_type == "user_phrase" then
-        return has_at_least_utf8_chars(text, 4)
-    end
-    return false
-end
-
-local function collect_scored_prefix(next_candidate, db, code2, code1, classifier_mode, limit, target_end)
-    local entries = {}
-    local boundary_cand = nil
-    local first_classifier = nil
-    local first_tier = nil
-    local first_c2 = nil
-    local first_c1 = nil
-    local needs_sort = false
-
-    while #entries < limit do
+local function collect_candidate_window(next_candidate, limit)
+    local window = {}
+    for i = 1, limit do
         local cand = next_candidate()
         if not cand then break end
-
-        local cand_type = cand.type or ""
-        if #entries == 0 then
-            if not REORDER_TYPE_WHITELIST[cand_type]
-                or (target_end ~= nil and cand._end ~= target_end)
-            then
-                boundary_cand = cand
-                break
-            end
-            if target_end == nil then target_end = cand._end end
-        elseif not REORDER_TYPE_WHITELIST[cand_type] or cand._end ~= target_end then
-            boundary_cand = cand
-            break
-        end
-
-        local text = cand.text or ""
-        local c2, c1 = get_context_counts_by_code(db, text, code2, code1)
-        local classifier = classifier_mode and CLASSIFIER_LOOKUP[text] or false
-        local tier = c2 > 0 and 2 or (c1 > 0 and 1 or 0)
-        local index = #entries + 1
-
-        if index == 1 then
-            first_classifier = classifier
-            first_tier = tier
-            first_c2 = c2
-            first_c1 = c1
-        elseif not needs_sort and (
-            classifier ~= first_classifier
-            or tier ~= first_tier
-            or c2 ~= first_c2
-            or c1 ~= first_c1
-        ) then
-            needs_sort = true
-        end
-
-        entries[index] = {
-            cand = cand,
-            c2 = c2,
-            c1 = c1,
-            classifier = classifier,
-            tier = tier,
-            raw_index = index,
-        }
-        remember_snapshot_candidate(text, c2 > 0 or c1 > 0)
+        window[i] = cand
     end
-
-    return entries, boundary_cand, needs_sort
+    return window
 end
 
-local function sort_scored_prefix(entries, classifier_mode)
-    sort(entries, function(a, b)
-        if classifier_mode and a.classifier ~= b.classifier then
-            return a.classifier
+local function is_reorderable_candidate(cand, target_end, target_length)
+    if not cand or not REORDER_TYPE_WHITELIST[cand.type or ""] then return false end
+    if cand._end ~= target_end then return false end
+
+    local text = cand.text or ""
+    if not is_valid_token(text) then return false end
+    if target_length and utf8_char_count(text) ~= target_length then return false end
+    return true
+end
+
+local function get_target_length(window, target_end, classifier_mode)
+    if classifier_mode then return 1 end
+
+    local target_length = nil
+    for i = 1, #window do
+        local cand = window[i]
+        if is_reorderable_candidate(cand, target_end, nil) then
+            local length = utf8_char_count(cand.text or "")
+            if length > 0 and (target_length == nil or length < target_length) then
+                target_length = length
+            end
         end
-        if a.tier ~= b.tier then return a.tier > b.tier end
-        if a.c2 ~= b.c2 then return a.c2 > b.c2 end
-        if a.c1 ~= b.c1 then return a.c1 > b.c1 end
-        return a.raw_index < b.raw_index
-    end)
+    end
+    return target_length
+end
+
+local function reorder_window(window, db, code2, code1, classifier_mode, target_end, target_length)
+    if not target_length then return end
+
+    local entries = {}
+    local slots = {}
+
+    for i = 1, #window do
+        local cand = window[i]
+        if is_reorderable_candidate(cand, target_end, target_length) then
+            local text = cand.text or ""
+            local c2, c1 = get_context_counts_by_code(db, text, code2, code1)
+            entries[#entries + 1] = {
+                cand = cand,
+                c2 = c2,
+                c1 = c1,
+                classifier = classifier_mode and CLASSIFIER_LOOKUP[text] or false,
+                tier = c2 > 0 and 2 or (c1 > 0 and 1 or 0),
+                raw_index = i,
+            }
+            slots[#slots + 1] = i
+            remember_snapshot_candidate(text, c2 > 0 or c1 > 0)
+        end
+    end
+
+    if #entries == 0 then return end
+
+    if #entries > 1 then
+        sort(entries, function(a, b)
+            if classifier_mode and a.classifier ~= b.classifier then
+                return a.classifier
+            end
+            if a.tier ~= b.tier then return a.tier > b.tier end
+            if a.c2 ~= b.c2 then return a.c2 > b.c2 end
+            if a.c1 ~= b.c1 then return a.c1 > b.c1 end
+            return a.raw_index < b.raw_index
+        end)
+    end
+
+    mark_learning_front(entries[1].cand.text or "")
+    for i = 1, #entries do
+        window[slots[i]] = entries[i].cand
+    end
 end
 
 function F.func(input, env)
@@ -697,10 +719,6 @@ function F.func(input, env)
         return
     end
 
-    local context1 = do_classifier and NUMBER_CONTEXT or context_state.prev1
-    local context2 = do_classifier and nil or context_state.prev2
-    local do_context = context1 ~= nil
-
     if do_fallback then
         clear_learning_snapshot()
         local next_candidate = make_candidate_reader(input)
@@ -714,11 +732,16 @@ function F.func(input, env)
             yield(first)
             if second then yield(second) end
         end
-        while true do local cand = next_candidate(); if not cand then break end; yield(cand) end
+        while true do
+            local cand = next_candidate()
+            if not cand then break end
+            yield(cand)
+        end
         return
     end
 
-    if not do_context and not do_classifier then
+    local context1 = do_classifier and NUMBER_CONTEXT or context_state.prev1
+    if not context1 then
         clear_learning_snapshot()
         for cand in input:iter() do yield(cand) end
         return
@@ -731,56 +754,25 @@ function F.func(input, env)
         return
     end
 
-    local next_candidate = make_candidate_reader(input)
+    local context2 = do_classifier and nil or context_state.prev2
     local code1 = ONE_PREFIX .. context1
     local code2 = context2 and (TWO_PREFIX .. context2 .. KEY_SEP .. context1) or nil
+    local target_end = #current_input
+    local next_candidate = make_candidate_reader(input)
+    local window = collect_candidate_window(next_candidate, FILTER_SCAN_LIMIT)
+
     begin_learning_snapshot(context2, context1)
-
-    local first = next_candidate()
-    if not first then return end
-
-    local protected_first = protect_first_candidate(first)
-    local protected_learnable = protected_first
-        and REORDER_TYPE_WHITELIST[first.type or ""] == true
-    local scan_limit = FILTER_SCAN_LIMIT
-    local target_end = nil
-    local yielded_first = false
-
-    if protected_first then
-        target_end = first._end
-        scan_limit = scan_limit - 1
-
-        if protected_learnable then
-            local text = first.text or ""
-            local c2, c1 = get_context_counts_by_code(db, text, code2, code1)
-            remember_snapshot_candidate(text, c2 > 0 or c1 > 0)
-            mark_learning_front(text)
-        else
-            yield(first)
-            yielded_first = true
-        end
-    else
-        local pending = first
-        local upstream = next_candidate
-        next_candidate = function()
-            if pending then
-                local cand = pending
-                pending = nil
-                return cand
-            end
-            return upstream()
-        end
+    if #window > 0 then
+        local target_length = get_target_length(window, target_end, do_classifier)
+        reorder_window(window, db, code2, code1, do_classifier, target_end, target_length)
+        for i = 1, #window do yield(window[i]) end
     end
 
-    local entries, boundary_cand, needs_sort = collect_scored_prefix(
-        next_candidate, db, code2, code1, do_classifier, scan_limit, target_end
-    )
-    if needs_sort then sort_scored_prefix(entries, do_classifier) end
-    if entries[1] then mark_learning_front(entries[1].cand.text or "") end
-    if protected_first and not yielded_first then yield(first) end
-    for i = 1, #entries do yield(entries[i].cand) end
-    if boundary_cand then yield(boundary_cand) end
-    while true do local cand = next_candidate(); if not cand then break end; yield(cand) end
+    while true do
+        local cand = next_candidate()
+        if not cand then break end
+        yield(cand)
+    end
 end
 
 function F.fini(env)
