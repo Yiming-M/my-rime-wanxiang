@@ -8,8 +8,8 @@ schema:
   author:
     - amzxyz
   description: |
-    请勾选【万象拼音】以启用，万象拼音标准版本，带声调的词库，支持语法模型，全拼、简拼、整句、声调辅助筛选，拥有超越大厂的输入体验！
-    请在文本框中直接输入对应方案的代码，例如：全拼输入“/pinyin”，自然码输入“/zrm”，小鹤输入“/flypy”（包含“/mspy”、“/sogou”、“/pyjj”等更多代码详见 README.md）。
+    请勾选【万象拼音】启用标准版：带调词库、语法模型，支持全拼、双拼、整句及声调辅助筛选。
+    在方案文本框输入代码：/pinyin 全拼；/flypy 小鹤；/mspy 微软；/zrm 自然码；/sogou 搜狗；/znabc 智能ABC；/ziguang 紫光；/pyjj 拼音加加；/gbpy 国标；/lxsq 乱序17；/ltsp 蓝天；/sdpy 首道；/wxsp 万象；/zrlong 自然龙；/hxlong 汉心龙；/jjf 间接辅助；/zjf 直接辅助。完整说明见 README.md。
   dependencies:
     - wanxiang_mixedcode  #混合编码
     - wanxiang_reverse  #部件拆字，反查及辅码
@@ -84,7 +84,7 @@ engine:
     - punct_translator  #配合 punct_segmentor 转换标点符号
     - script_translator  #脚本翻译器，用于拼音、粤拼等基于音节表的输入方案
     - lua_translator@*wanxiang.version_display  #输入'/wx'，显示万象项目网址和当前版本号
-    - lua_translator@*wanxiang.set_schema  #输入'/zrm'，快速切换为自然码双拼， /flypy→小鹤双拼 /mspy→微软双拼 /zrm→自然码 /sogou→搜狗双拼 /abc→智能ABC /ziguang→紫光双拼 /pyjj→拼音加加 /gbpy→国标双拼 /lxsq→乱序17 /pinyin→全拼
+    - lua_translator@*wanxiang.set_schema  #输入类似'/zrm'，快速切换为自然码双拼其余阅读文档
     - lua_translator@*wanxiang.shijian  #农历、日期、节气、节日、时间、周、问候模板等等，触发清单看下文
     - lua_translator@*wanxiang.unicode_conversion*T  #通过输入大写U引导，并输入Unicode编码获得汉字输出
     - lua_translator@*wanxiang.number_conversion  #数字、金额大写，通过输入大写R1234获得候选输出
@@ -97,6 +97,7 @@ engine:
     - reverse_lookup_translator@wanxiang_reverse  #挂接部件组字和笔画反查
   filters:
     - lua_filter@*wanxiang.charset_filter  #放replacer前面,全方位自定义的字符集过滤器，支持繁体字符集开放
+    - lua_filter@*wanxiang.auto_phrase  #无感造词，配合super_lookup实现反查时造词
     - lua_filter@*wanxiang.super_lookup  #字词输入中反查辅助筛选
     - lua_filter@*wanxiang.custom_phrase  #用户自定义置顶词与简码前置
     - lua_filter@*wanxiang.context_reorder*F  #用于输入编码后的上下文调频
@@ -135,7 +136,7 @@ translator:
   # encode_commit_history: true  # 预留历史上屏自动编码成词
   core_word_length: 4  # >0 启用，按段学词 + 相邻段拼接
   max_word_length: 7  # >0 启用，过长短语不记整词，只加元素权重
-  contextual_suggestions: true  #开启基于模型预设数据的上下文调频
+  contextual_suggestions: false  #开启基于模型预设数据的上下文调频
   max_homophones: 8
   initial_quality: 3  #初始质量拼音的权重应该比英文大
   spelling_hints: 30  #将注释以词典code字符串形式完全暴露，通过super_comment.lua完全接管，灵活配置。
@@ -384,6 +385,12 @@ super_comment:
     abbrev: ""  # 简码标记
     fallback: "~"  # 回退标记
 
+# 按需提交
+partial_commit:
+  control_digits: true  # Ctrl+数字上屏前N字
+  first_key: "["         # 以词定字：首字
+  last_key: "]"          # 以词定字：末字
+
 super_processor:
   enable_backspace_limit: true  # 开启/关闭退格限制
   enable_seg_loop: true  # 开启/关闭分词符（'）循环
@@ -391,10 +398,6 @@ super_processor:
   enable_predict_space: false  # 启用联想空格打断，直接上屏空格并清空联想，对齐大厂，如果用原生librime-predict这个还有用留着
   kp_number_mode: auto  # 小键盘模式 (auto / compose / select)
   limit_repeated: "8,40"  #格式："最大重复声母数,最大候选字数"
-  select_character: "[,]"  # 开启以词定字，自动拆解第一位上屏首字，第二位上屏尾字
-  # 下面这些写法都支持：
-  # select_character: "[,]"                      # [ 上屏首字，] 上屏尾字（推荐）
-  # select_character: "bracketleft, bracketright"  # [ 上屏首字，] 上屏尾字（英文全拼）
 
 unicode:
   key: Control+u
