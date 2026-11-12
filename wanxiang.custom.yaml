@@ -8,6 +8,7 @@ patch:
       - wanxiang_algebra:/base/全拼
 
   menu/page_size: 6
+  switches/@1/reset: 0  # 默认中文标点
 
   # 自动学习开启；不启用主动上下文预测。
   translator/enable_user_dict: true

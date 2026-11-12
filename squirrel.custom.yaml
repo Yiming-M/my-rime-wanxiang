@@ -33,14 +33,8 @@ patch:
     #   ascii_mode: true     # true默认英文,false默认中文
     # com.apple.Terminal:    # 终端
     #   ascii_mode: true
-    com.microsoft.VSCode:  # Visual Studio Code
-      # ascii_mode: true
-      ascii_punct: true    # 中文状态输出英文标点 (半角)
     com.googlecode.iterm2: # iTerm2
       ascii_mode: true
-      ascii_punct: true
-    md.obsidian:           # Obsidian
-      ascii_punct: true
     # org.b3log.siyuan:
     #   ascii_punct: true
 
