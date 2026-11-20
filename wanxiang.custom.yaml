@@ -17,3 +17,22 @@ patch:
 
   # 关闭万象附加简码库；拼音补全仍可能产生短编码候选。
   switches/@8/reset: 0
+
+  # 关闭 V 键计算器，同时卸载会回退到 V 前缀的 Lua 翻译器。
+  recognizer/patterns/calculator: null
+  engine/translators/@7: null  # lua_translator@*wanxiang.super_calculator
+
+  # Markdown 反引号直接上屏，连按三次得到代码围栏。
+  recognizer/patterns/wanxiang_reverse: null
+  speller/alphabet: 'zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA1234567890;/\'
+  'punctuator/half_shape/`': {commit: '`'}
+
+  # 对 LXGW Bright 覆盖的表情显式请求彩色呈现，保留非表情候选的字体。
+  super_replacer/rules/@next:
+    option: true
+    mode: replace
+    comment_mode: append
+    tags: [abc, super_emoji]
+    prefix: _emoji_presentation_
+    files:
+      - lua/data/emoji_presentation.txt
