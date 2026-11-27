@@ -22,6 +22,9 @@ patch:
   recognizer/patterns/calculator: null
   engine/translators/@7: null  # lua_translator@*wanxiang.super_calculator
 
+  # 纯大写英文优先显示原文，词典补全作为后续候选。
+  engine/filters/@before 0: lua_filter@*uppercase_english
+
   # Markdown 反引号直接上屏，连按三次得到代码围栏。
   recognizer/patterns/wanxiang_reverse: null
   speller/alphabet: 'zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA1234567890;/\'
